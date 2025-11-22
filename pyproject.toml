@@ -17,9 +17,11 @@ dependencies = [
   "optax>=0.2.6",
   "pandas>=2.3.3",
   "pytest>=8.3.5",
+  "schedulefree>=1.4.1",
   "scikit-learn==1.6.1",
   "seaborn>=0.13.2",
   "tabpfn==2.2.1",
+  "torch>=2.9.1",
 ]
 
 [dependency-groups]
