@@ -7,12 +7,19 @@ name = "ml_project_template"
 version = "0.0.14"
 requires-python = ">=3.12"
 dependencies = [
-  "wandb>=0.18.5",
-  "hydra-zen>=0.14.0",
-  "submitit>=1.5.1",
-  "python-dotenv>=1.0.1",
-  "pydantic>=2.10.3",
+  "equinox>=0.13.2",
+  "h5py>=3.15.1",
+  "ipykernel>=7.1.0",
+  "jax[cuda]==0.5.3",
+  "jaxtyping>=0.3.3",
+  "numpy>=2.3.5",
+  "openml>=0.15.1",
+  "optax>=0.2.6",
+  "pandas>=2.3.3",
   "pytest>=8.3.5",
+  "scikit-learn==1.6.1",
+  "seaborn>=0.13.2",
+  "tabpfn==2.2.1",
 ]
 
 [dependency-groups]
@@ -95,6 +102,7 @@ ignore = [
   "E712",
   "PLR0913",
   "TC001",
+  "F722",
 ]
 
 [tool.ruff.lint.per-file-ignores]
