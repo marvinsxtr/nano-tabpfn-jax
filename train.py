@@ -1,6 +1,6 @@
 import random
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 
 import equinox as eqx
 import h5py
@@ -19,7 +19,8 @@ from torch.utils.data import DataLoader
 from model import NanoTabPFNClassifier, NanoTabPFNModel
 
 
-def set_randomness_seed(seed):
+def set_randomness_seed(seed: int) -> None:
+    """Set the random seed for reproducibility."""
     random.seed(seed)
     np.random.seed(seed)
 
@@ -27,7 +28,8 @@ def set_randomness_seed(seed):
 set_randomness_seed(0)
 
 
-def get_default_device():
+def get_default_device() -> str:
+    """Get the default device for PyTorch computations."""
     device = "cpu"
     if torch.backends.mps.is_available():
         device = "mps"
@@ -41,7 +43,8 @@ datasets = []
 datasets.append(train_test_split(*load_breast_cancer(return_X_y=True), test_size=0.5, random_state=0))
 
 
-def eval(classifier):
+def eval(classifier: NanoTabPFNClassifier) -> dict[str, float]:  # noqa: A001
+    """Evaluate the classifier on multiple datasets and return average scores."""
     scores = {"roc_auc": 0, "acc": 0, "balanced_acc": 0}
     for X_train, X_test, y_train, y_test in datasets:
         classifier.fit(X_train, y_train)
@@ -129,11 +132,11 @@ def make_step(
 
 def train(
     model: NanoTabPFNModel,
-    prior,
+    prior: DataLoader,
     lr: float = 1e-4,
     steps_per_eval: int = 10,
-    eval_func: Callable = None,
-):
+    eval_func: Callable | None = None,
+) -> tuple[NanoTabPFNModel, list[tuple[float, dict]]]:
     """Trains our model on the given prior using cross-entropy loss.
 
     Args:
@@ -177,6 +180,7 @@ def train(
             train_mask = np.broadcast_to(train_mask, (x.shape[0], x.shape[1]))  # (batch_size, num_rows)
 
             data = (x_padded, y)
+
             loss, _, model, opt_state = make_step(model, data, y, train_mask, opt_state, optimizer)
 
             total_loss = float(loss)
@@ -216,7 +220,7 @@ class PriorDumpDataLoader(DataLoader):
         device (torch.device): Device to load tensors onto.
     """
 
-    def __init__(self, filename, num_steps, batch_size, device=None):
+    def __init__(self, filename: str, num_steps: int, batch_size: int, device: torch.device | None = None) -> None:  # noqa: ARG002
         self.filename = filename
         self.num_steps = num_steps
         self.batch_size = batch_size
@@ -224,7 +228,8 @@ class PriorDumpDataLoader(DataLoader):
         with h5py.File(self.filename, "r") as f:
             self.max_num_classes = f["max_num_classes"][0]
 
-    def __iter__(self):
+    def __iter__(self) -> Generator[dict[str, np.ndarray]]:
+        """Yield batches of data from the HDF5 file."""
         with h5py.File(self.filename, "r") as f:
             for _ in range(self.num_steps):
                 end = self.pointer + self.batch_size
@@ -246,17 +251,6 @@ class PriorDumpDataLoader(DataLoader):
                     "train_test_split_index": train_test_split_index,
                 }
 
-    def __len__(self):
+    def __len__(self) -> int:
+        """Return the number of batches per epoch."""
         return self.num_steps
-
-
-if __name__ == "__main__":
-    key = jr.PRNGKey(0)
-    model = NanoTabPFNModel(
-        embedding_size=96, num_attention_heads=4, mlp_hidden_size=192, num_layers=3, num_outputs=2, key=key
-    )
-    prior = PriorDumpDataLoader("300k_150x5.h5", num_steps=2500, batch_size=32)
-    key = jr.PRNGKey(1)
-    model, history = train(model, prior, key, lr=4e-3, steps_per_eval=25)
-    print("Final evaluation:")
-    print(eval(NanoTabPFNClassifier(model)))

@@ -316,6 +316,17 @@ class NanoTabPFNModel(eqx.Module):
         return output
 
 
+@eqx.filter_jit
+def predict(
+    model: NanoTabPFNModel,
+    x: Float[Array, "num_rows num_features"],
+    y: Float[Array, "num_rows 1"],
+    train_mask: Float[Array, " num_rows"],
+) -> Float[Array, "num_rows num_outputs"]:
+    """JIT-compiled prediction function for the NanoTabPFNModel."""
+    return model(x, y, train_mask=train_mask)
+
+
 class NanoTabPFNClassifier:
     """scikit-learn like interface for JAX model."""
 
@@ -354,7 +365,7 @@ class NanoTabPFNClassifier:
         num_train = len(self.X_train)
         train_mask = jnp.arange(len(x)) < num_train
 
-        out = self.model(x, y, train_mask=train_mask)
+        out = predict(self.model, x, y, train_mask=train_mask)
 
         # Extract only test predictions (train predictions are zeroed out)
         out = out[num_train:]
