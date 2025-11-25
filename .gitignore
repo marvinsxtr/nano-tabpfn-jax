@@ -166,3 +166,4 @@ wandb
 __pycache__/
 *.pth
 *.h5
+nanotabpfn_summary.png

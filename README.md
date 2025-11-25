@@ -1,13 +1,11 @@
 # nanoTabPFN
 
+> [!NOTE]  
+> This is a reimplementation of [nanoTabPFN](https://github.com/automl/nanoTabPFN) in JAX, please cite their work. To avoid recompilation for different numbers of input features, a padding was added.
+
 Train your own small TabPFN in less than 500 LOC and a few minutes.
 
 The purpose of this repository is to be a good starting point for students and researchers that are interested in learning about how TabPFN works under the hood.
-
-Clone the repository, afterwards install dependencies via:
-```
-pip install numpy torch schedulefree h5py scikit-learn openml seaborn
-```
 
 ### Our Code
 

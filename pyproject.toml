@@ -41,7 +41,7 @@ disable_error_code = ["import-untyped"]
 [tool.ruff]
 line-length = 119
 indent-width = 4
-extend-exclude = ["experiment.ipynb"]
+extend-exclude = ["experiment.ipynb", "tests", "torch_impl"]
 
 [tool.ruff.pydocstyle]
 convention = "google"

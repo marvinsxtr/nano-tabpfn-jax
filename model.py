@@ -200,8 +200,6 @@ class TransformerEncoderLayer(eqx.Module):
         Returns:
             (num_rows, num_features+1, embedding_size)
         """
-        print("recompile call nanopfn transformer block")
-
         src_features = jax.vmap(self._multihead_attention_features)(src, src, src) + src
         src = jax.vmap(jax.vmap(self.norm1))(src_features)
 
@@ -293,8 +291,6 @@ class NanoTabPFNModel(eqx.Module):
         Returns:
             logits of shape (test_size, num_outputs) for test datapoints only
         """
-        print("recompile call nanopfn model")
-
         # Ensure y_src has the right shape
         if len(y_src.shape) < len(x_src.shape):
             y_src = y_src[..., None]

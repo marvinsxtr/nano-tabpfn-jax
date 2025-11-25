@@ -6,7 +6,6 @@ import equinox as eqx
 import h5py
 import jax
 import jax.numpy as jnp
-import jax.random as jr
 import numpy as np
 import optax
 import torch
@@ -163,7 +162,8 @@ def train(
     try:
         for step, full_data in enumerate(prior):
             if step == 0:
-                print(f"Step {step}: Starting first training step (compiling)...")
+                print("Starting first training step (compiling)...")
+
             step_start_time = time.time()
 
             x, y = full_data["x"], full_data["y"]
@@ -172,27 +172,22 @@ def train(
             # Pad to 10 features if needed
             if x.shape[2] < 10:
                 padding = np.zeros((x.shape[0], x.shape[1], 10 - x.shape[2]))
-                x_padded = np.concatenate([x, padding], axis=2)
-            else:
-                x_padded = x
+                x = np.concatenate([x, padding], axis=2)
 
             train_mask = np.arange(x.shape[1]) < train_test_split_index  # x.shape[1] is num_rows
             train_mask = np.broadcast_to(train_mask, (x.shape[0], x.shape[1]))  # (batch_size, num_rows)
 
-            data = (x_padded, y)
+            data = (x, y)
 
             loss, _, model, opt_state = make_step(model, data, y, train_mask, opt_state, optimizer)
+
+            # Start timing after compile
+            if step == 0:
+                step_start_time = time.time()
 
             total_loss = float(loss)
             step_train_duration = time.time() - step_start_time
             train_time += step_train_duration
-
-            if step == 0:
-                print(f"Step {step} completed in {step_train_duration:.1f}s (compilation + execution)")
-
-            # Print progress every step
-            if step > 0 and step % 10 == 0:
-                print(f"Step {step}: loss {total_loss:7.4f}, time {step_train_duration:.2f}s")
 
             # Evaluate
             if step % steps_per_eval == steps_per_eval - 1 and eval_func is not None:
