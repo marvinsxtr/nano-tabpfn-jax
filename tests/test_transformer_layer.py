@@ -1,7 +1,5 @@
 """Step-by-step numerical validation tests for TransformerEncoderLayer."""
 
-from functools import partial
-
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -32,12 +30,11 @@ def _copy_torch_layernorm_to_jax(jax_ln: eqx.nn.LayerNorm, torch_ln: torch.nn.La
     return jax_ln
 
 
-def _copy_torch_mha_to_jax(
-    jax_layer: JAXTransformerLayer,
+def _copy_torch_mha_to_eqx_mha(
+    jax_mha: eqx.nn.MultiheadAttention,
     torch_mha: torch.nn.MultiheadAttention,
-    is_features: bool = True,
-) -> JAXTransformerLayer:
-    """Copy PyTorch MultiheadAttention weights to JAX attention layers."""
+) -> eqx.nn.MultiheadAttention:
+    """Copy PyTorch MultiheadAttention weights to equinox MultiheadAttention."""
     embed_dim = torch_mha.embed_dim
 
     in_proj_weight = torch_mha.in_proj_weight.detach().cpu().numpy()
@@ -53,26 +50,16 @@ def _copy_torch_mha_to_jax(
     b_k = in_proj_bias[embed_dim : 2 * embed_dim]
     b_v = in_proj_bias[2 * embed_dim :]
 
-    if is_features:
-        jax_layer = eqx.tree_at(lambda m: m.self_attn_features_q.weight, jax_layer, jnp.array(w_q))
-        jax_layer = eqx.tree_at(lambda m: m.self_attn_features_q.bias, jax_layer, jnp.array(b_q))
-        jax_layer = eqx.tree_at(lambda m: m.self_attn_features_k.weight, jax_layer, jnp.array(w_k))
-        jax_layer = eqx.tree_at(lambda m: m.self_attn_features_k.bias, jax_layer, jnp.array(b_k))
-        jax_layer = eqx.tree_at(lambda m: m.self_attn_features_v.weight, jax_layer, jnp.array(w_v))
-        jax_layer = eqx.tree_at(lambda m: m.self_attn_features_v.bias, jax_layer, jnp.array(b_v))
-        jax_layer = eqx.tree_at(lambda m: m.self_attn_features_out.weight, jax_layer, jnp.array(out_proj_weight))
-        jax_layer = eqx.tree_at(lambda m: m.self_attn_features_out.bias, jax_layer, jnp.array(out_proj_bias))
-    else:
-        jax_layer = eqx.tree_at(lambda m: m.self_attn_datapoints_q.weight, jax_layer, jnp.array(w_q))
-        jax_layer = eqx.tree_at(lambda m: m.self_attn_datapoints_q.bias, jax_layer, jnp.array(b_q))
-        jax_layer = eqx.tree_at(lambda m: m.self_attn_datapoints_k.weight, jax_layer, jnp.array(w_k))
-        jax_layer = eqx.tree_at(lambda m: m.self_attn_datapoints_k.bias, jax_layer, jnp.array(b_k))
-        jax_layer = eqx.tree_at(lambda m: m.self_attn_datapoints_v.weight, jax_layer, jnp.array(w_v))
-        jax_layer = eqx.tree_at(lambda m: m.self_attn_datapoints_v.bias, jax_layer, jnp.array(b_v))
-        jax_layer = eqx.tree_at(lambda m: m.self_attn_datapoints_out.weight, jax_layer, jnp.array(out_proj_weight))
-        jax_layer = eqx.tree_at(lambda m: m.self_attn_datapoints_out.bias, jax_layer, jnp.array(out_proj_bias))
+    jax_mha = eqx.tree_at(lambda m: m.query_proj.weight, jax_mha, jnp.array(w_q))
+    jax_mha = eqx.tree_at(lambda m: m.query_proj.bias, jax_mha, jnp.array(b_q))
+    jax_mha = eqx.tree_at(lambda m: m.key_proj.weight, jax_mha, jnp.array(w_k))
+    jax_mha = eqx.tree_at(lambda m: m.key_proj.bias, jax_mha, jnp.array(b_k))
+    jax_mha = eqx.tree_at(lambda m: m.value_proj.weight, jax_mha, jnp.array(w_v))
+    jax_mha = eqx.tree_at(lambda m: m.value_proj.bias, jax_mha, jnp.array(b_v))
+    jax_mha = eqx.tree_at(lambda m: m.output_proj.weight, jax_mha, jnp.array(out_proj_weight))
+    jax_mha = eqx.tree_at(lambda m: m.output_proj.bias, jax_mha, jnp.array(out_proj_bias))
 
-    return jax_layer
+    return jax_mha
 
 
 @pytest.fixture
@@ -98,8 +85,16 @@ def transformer_setup() -> dict:
     key = jax.random.PRNGKey(0)
     jax_layer = JAXTransformerLayer(embedding_size, nhead, mlp_hidden_size, key=key)
 
-    jax_layer = _copy_torch_mha_to_jax(jax_layer, torch_layer.self_attention_between_features, is_features=True)
-    jax_layer = _copy_torch_mha_to_jax(jax_layer, torch_layer.self_attention_between_datapoints, is_features=False)
+    jax_layer = eqx.tree_at(
+        lambda m: m.self_attn_features,
+        jax_layer,
+        _copy_torch_mha_to_eqx_mha(jax_layer.self_attn_features, torch_layer.self_attention_between_features),
+    )
+    jax_layer = eqx.tree_at(
+        lambda m: m.self_attn_datapoints,
+        jax_layer,
+        _copy_torch_mha_to_eqx_mha(jax_layer.self_attn_datapoints, torch_layer.self_attention_between_datapoints),
+    )
     jax_layer = eqx.tree_at(
         lambda m: m.linear1,
         jax_layer,
@@ -156,7 +151,7 @@ def test_feature_attention(transformer_setup: dict) -> None:
     src_torch_feat = src_torch_feat + src_torch_reshaped
     src_torch_feat_np = src_torch_feat.cpu().numpy()
 
-    src_jax_feat = jax.vmap(setup["jax_layer"]._multihead_attention_features)(src_jax, src_jax, src_jax) + src_jax
+    src_jax_feat = jax.vmap(setup["jax_layer"].self_attn_features)(src_jax, src_jax, src_jax) + src_jax
     src_jax_feat_np = np.array(src_jax_feat)
 
     np.testing.assert_allclose(src_jax_feat_np, src_torch_feat_np, atol=1e-2)
@@ -184,7 +179,7 @@ def test_layernorm1(transformer_setup: dict) -> None:
         src_torch_norm1 = setup["torch_layer"].norm1(src_torch_feat_reshaped)
     src_torch_norm1_np = src_torch_norm1.cpu().numpy()
 
-    src_jax_feat = jax.vmap(setup["jax_layer"]._multihead_attention_features)(src_jax, src_jax, src_jax) + src_jax
+    src_jax_feat = jax.vmap(setup["jax_layer"].self_attn_features)(src_jax, src_jax, src_jax) + src_jax
     src_jax_norm1 = jax.vmap(jax.vmap(setup["jax_layer"].norm1))(src_jax_feat)
     src_jax_norm1_np = np.array(src_jax_norm1)
 
@@ -229,13 +224,13 @@ def test_datapoint_attention(transformer_setup: dict) -> None:
     src_torch_dp = src_torch_dp.reshape(batch_size, col_size, rows_size, emb_size).transpose(2, 1)
     src_torch_dp_np = src_torch_dp.cpu().numpy()
 
-    src_jax_feat = jax.vmap(setup["jax_layer"]._multihead_attention_features)(src_jax, src_jax, src_jax) + src_jax
+    src_jax_feat = jax.vmap(setup["jax_layer"].self_attn_features)(src_jax, src_jax, src_jax) + src_jax
     src_jax_norm1 = jax.vmap(jax.vmap(setup["jax_layer"].norm1))(src_jax_feat)
     src_jax_transposed = jnp.transpose(src_jax_norm1, (1, 0, 2))
     train_mask_jax = jnp.arange(rows_size) < train_test_split_index
-    mask = train_mask_jax[None, :]
-    mha = partial(setup["jax_layer"]._multihead_attention_datapoints, mask=mask)
-    src_jax_dp = jax.vmap(mha)(src_jax_transposed, src_jax_transposed, src_jax_transposed) + src_jax_transposed
+    mask = jnp.broadcast_to(train_mask_jax, (rows_size, rows_size))
+    mha_fn = lambda q, k, v: setup["jax_layer"].self_attn_datapoints(q, k, v, mask=mask)
+    src_jax_dp = jax.vmap(mha_fn)(src_jax_transposed, src_jax_transposed, src_jax_transposed) + src_jax_transposed
     src_jax_dp = jnp.transpose(src_jax_dp, (1, 0, 2))
     src_jax_dp_np = np.array(src_jax_dp)
 
@@ -281,13 +276,13 @@ def test_layernorm2(transformer_setup: dict) -> None:
         src_torch_norm2 = setup["torch_layer"].norm2(src_torch_dp)
     src_torch_norm2_np = src_torch_norm2.cpu().numpy()
 
-    src_jax_feat = jax.vmap(setup["jax_layer"]._multihead_attention_features)(src_jax, src_jax, src_jax) + src_jax
+    src_jax_feat = jax.vmap(setup["jax_layer"].self_attn_features)(src_jax, src_jax, src_jax) + src_jax
     src_jax_norm1 = jax.vmap(jax.vmap(setup["jax_layer"].norm1))(src_jax_feat)
     src_jax_transposed = jnp.transpose(src_jax_norm1, (1, 0, 2))
     train_mask_jax = jnp.arange(rows_size) < train_test_split_index
-    mask = train_mask_jax[None, :]
-    mha = partial(setup["jax_layer"]._multihead_attention_datapoints, mask=mask)
-    src_jax_dp = jax.vmap(mha)(src_jax_transposed, src_jax_transposed, src_jax_transposed) + src_jax_transposed
+    mask = jnp.broadcast_to(train_mask_jax, (rows_size, rows_size))
+    mha_fn = lambda q, k, v: setup["jax_layer"].self_attn_datapoints(q, k, v, mask=mask)
+    src_jax_dp = jax.vmap(mha_fn)(src_jax_transposed, src_jax_transposed, src_jax_transposed) + src_jax_transposed
     src_jax_dp = jnp.transpose(src_jax_dp, (1, 0, 2))
     src_jax_norm2 = jax.vmap(jax.vmap(setup["jax_layer"].norm2))(src_jax_dp)
     src_jax_norm2_np = np.array(src_jax_norm2)
@@ -337,13 +332,13 @@ def test_mlp(transformer_setup: dict) -> None:
         )
     src_torch_mlp_np = src_torch_mlp.cpu().numpy()
 
-    src_jax_feat = jax.vmap(setup["jax_layer"]._multihead_attention_features)(src_jax, src_jax, src_jax) + src_jax
+    src_jax_feat = jax.vmap(setup["jax_layer"].self_attn_features)(src_jax, src_jax, src_jax) + src_jax
     src_jax_norm1 = jax.vmap(jax.vmap(setup["jax_layer"].norm1))(src_jax_feat)
     src_jax_transposed = jnp.transpose(src_jax_norm1, (1, 0, 2))
     train_mask_jax = jnp.arange(rows_size) < train_test_split_index
-    mask = train_mask_jax[None, :]
-    mha = partial(setup["jax_layer"]._multihead_attention_datapoints, mask=mask)
-    src_jax_dp = jax.vmap(mha)(src_jax_transposed, src_jax_transposed, src_jax_transposed) + src_jax_transposed
+    mask = jnp.broadcast_to(train_mask_jax, (rows_size, rows_size))
+    mha_fn = lambda q, k, v: setup["jax_layer"].self_attn_datapoints(q, k, v, mask=mask)
+    src_jax_dp = jax.vmap(mha_fn)(src_jax_transposed, src_jax_transposed, src_jax_transposed) + src_jax_transposed
     src_jax_dp = jnp.transpose(src_jax_dp, (1, 0, 2))
     src_jax_norm2 = jax.vmap(jax.vmap(setup["jax_layer"].norm2))(src_jax_dp)
     jax_layer = setup["jax_layer"]
@@ -399,13 +394,13 @@ def test_layernorm3_final(transformer_setup: dict) -> None:
         src_torch_final = setup["torch_layer"].norm3(src_torch_mlp)
     src_torch_final_np = src_torch_final.squeeze(0).cpu().numpy()
 
-    src_jax_feat = jax.vmap(setup["jax_layer"]._multihead_attention_features)(src_jax, src_jax, src_jax) + src_jax
+    src_jax_feat = jax.vmap(setup["jax_layer"].self_attn_features)(src_jax, src_jax, src_jax) + src_jax
     src_jax_norm1 = jax.vmap(jax.vmap(setup["jax_layer"].norm1))(src_jax_feat)
     src_jax_transposed = jnp.transpose(src_jax_norm1, (1, 0, 2))
     train_mask_jax = jnp.arange(rows_size) < train_test_split_index
-    mask = train_mask_jax[None, :]
-    mha = partial(setup["jax_layer"]._multihead_attention_datapoints, mask=mask)
-    src_jax_dp = jax.vmap(mha)(src_jax_transposed, src_jax_transposed, src_jax_transposed) + src_jax_transposed
+    mask = jnp.broadcast_to(train_mask_jax, (rows_size, rows_size))
+    mha_fn = lambda q, k, v: setup["jax_layer"].self_attn_datapoints(q, k, v, mask=mask)
+    src_jax_dp = jax.vmap(mha_fn)(src_jax_transposed, src_jax_transposed, src_jax_transposed) + src_jax_transposed
     src_jax_dp = jnp.transpose(src_jax_dp, (1, 0, 2))
     src_jax_norm2 = jax.vmap(jax.vmap(setup["jax_layer"].norm2))(src_jax_dp)
     jax_layer = setup["jax_layer"]

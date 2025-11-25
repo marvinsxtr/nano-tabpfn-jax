@@ -6,6 +6,7 @@ import equinox as eqx
 import h5py
 import jax
 import jax.numpy as jnp
+import jax.random as jr
 import numpy as np
 import optax
 import torch
@@ -25,16 +26,6 @@ def set_randomness_seed(seed: int) -> None:
 
 
 set_randomness_seed(0)
-
-
-def get_default_device() -> str:
-    """Get the default device for PyTorch computations."""
-    device = "cpu"
-    if torch.backends.mps.is_available():
-        device = "mps"
-    if torch.cuda.is_available():
-        device = "cuda"
-    return device
 
 
 # Prepare datasets
@@ -249,3 +240,14 @@ class PriorDumpDataLoader(DataLoader):
     def __len__(self) -> int:
         """Return the number of batches per epoch."""
         return self.num_steps
+
+
+if __name__ == "__main__":
+    key = jr.PRNGKey(0)
+    model = NanoTabPFNModel(
+        embedding_size=96, num_attention_heads=4, mlp_hidden_size=192, num_layers=3, num_outputs=2, key=key
+    )
+    prior = PriorDumpDataLoader("300k_150x5.h5", num_steps=2500, batch_size=32)
+    model, history = train(model, prior, lr=4e-3, steps_per_eval=25)
+    print("Final evaluation:")
+    print(eval(NanoTabPFNClassifier(model)))

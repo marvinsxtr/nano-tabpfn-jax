@@ -29,8 +29,11 @@ def _copy_torch_layernorm_to_jax(jax_ln: eqx.nn.LayerNorm, torch_ln: torch.nn.La
     return jax_ln
 
 
-def _copy_torch_mha_to_jax(jax_layer, torch_mha, is_features: bool = True):
-    """Copy PyTorch MultiheadAttention weights to JAX attention layers."""
+def _copy_torch_mha_to_eqx_mha(
+    jax_mha: eqx.nn.MultiheadAttention,
+    torch_mha: torch.nn.MultiheadAttention,
+) -> eqx.nn.MultiheadAttention:
+    """Copy PyTorch MultiheadAttention weights to equinox MultiheadAttention."""
     embed_dim = torch_mha.embed_dim
 
     in_proj_weight = torch_mha.in_proj_weight.detach().cpu().numpy()
@@ -46,26 +49,16 @@ def _copy_torch_mha_to_jax(jax_layer, torch_mha, is_features: bool = True):
     b_k = in_proj_bias[embed_dim : 2 * embed_dim]
     b_v = in_proj_bias[2 * embed_dim :]
 
-    if is_features:
-        jax_layer = eqx.tree_at(lambda m: m.self_attn_features_q.weight, jax_layer, jnp.array(w_q))
-        jax_layer = eqx.tree_at(lambda m: m.self_attn_features_q.bias, jax_layer, jnp.array(b_q))
-        jax_layer = eqx.tree_at(lambda m: m.self_attn_features_k.weight, jax_layer, jnp.array(w_k))
-        jax_layer = eqx.tree_at(lambda m: m.self_attn_features_k.bias, jax_layer, jnp.array(b_k))
-        jax_layer = eqx.tree_at(lambda m: m.self_attn_features_v.weight, jax_layer, jnp.array(w_v))
-        jax_layer = eqx.tree_at(lambda m: m.self_attn_features_v.bias, jax_layer, jnp.array(b_v))
-        jax_layer = eqx.tree_at(lambda m: m.self_attn_features_out.weight, jax_layer, jnp.array(out_proj_weight))
-        jax_layer = eqx.tree_at(lambda m: m.self_attn_features_out.bias, jax_layer, jnp.array(out_proj_bias))
-    else:
-        jax_layer = eqx.tree_at(lambda m: m.self_attn_datapoints_q.weight, jax_layer, jnp.array(w_q))
-        jax_layer = eqx.tree_at(lambda m: m.self_attn_datapoints_q.bias, jax_layer, jnp.array(b_q))
-        jax_layer = eqx.tree_at(lambda m: m.self_attn_datapoints_k.weight, jax_layer, jnp.array(w_k))
-        jax_layer = eqx.tree_at(lambda m: m.self_attn_datapoints_k.bias, jax_layer, jnp.array(b_k))
-        jax_layer = eqx.tree_at(lambda m: m.self_attn_datapoints_v.weight, jax_layer, jnp.array(w_v))
-        jax_layer = eqx.tree_at(lambda m: m.self_attn_datapoints_v.bias, jax_layer, jnp.array(b_v))
-        jax_layer = eqx.tree_at(lambda m: m.self_attn_datapoints_out.weight, jax_layer, jnp.array(out_proj_weight))
-        jax_layer = eqx.tree_at(lambda m: m.self_attn_datapoints_out.bias, jax_layer, jnp.array(out_proj_bias))
+    jax_mha = eqx.tree_at(lambda m: m.query_proj.weight, jax_mha, jnp.array(w_q))
+    jax_mha = eqx.tree_at(lambda m: m.query_proj.bias, jax_mha, jnp.array(b_q))
+    jax_mha = eqx.tree_at(lambda m: m.key_proj.weight, jax_mha, jnp.array(w_k))
+    jax_mha = eqx.tree_at(lambda m: m.key_proj.bias, jax_mha, jnp.array(b_k))
+    jax_mha = eqx.tree_at(lambda m: m.value_proj.weight, jax_mha, jnp.array(w_v))
+    jax_mha = eqx.tree_at(lambda m: m.value_proj.bias, jax_mha, jnp.array(b_v))
+    jax_mha = eqx.tree_at(lambda m: m.output_proj.weight, jax_mha, jnp.array(out_proj_weight))
+    jax_mha = eqx.tree_at(lambda m: m.output_proj.bias, jax_mha, jnp.array(out_proj_bias))
 
-    return jax_layer
+    return jax_mha
 
 
 def _copy_model_weights(jax_model: JAXNanoTabPFN, torch_model: TorchNanoTabPFN) -> JAXNanoTabPFN:
@@ -93,8 +86,16 @@ def _copy_model_weights(jax_model: JAXNanoTabPFN, torch_model: TorchNanoTabPFN) 
     for i, torch_block in enumerate(torch_model.transformer_blocks):
         jax_block = jax_model.transformer_blocks[i]
 
-        jax_block = _copy_torch_mha_to_jax(jax_block, torch_block.self_attention_between_features, is_features=True)
-        jax_block = _copy_torch_mha_to_jax(jax_block, torch_block.self_attention_between_datapoints, is_features=False)
+        jax_block = eqx.tree_at(
+            lambda m: m.self_attn_features,
+            jax_block,
+            _copy_torch_mha_to_eqx_mha(jax_block.self_attn_features, torch_block.self_attention_between_features),
+        )
+        jax_block = eqx.tree_at(
+            lambda m: m.self_attn_datapoints,
+            jax_block,
+            _copy_torch_mha_to_eqx_mha(jax_block.self_attn_datapoints, torch_block.self_attention_between_datapoints),
+        )
 
         jax_block = eqx.tree_at(
             lambda m: m.linear1,
@@ -123,7 +124,7 @@ def _copy_model_weights(jax_model: JAXNanoTabPFN, torch_model: TorchNanoTabPFN) 
             _copy_torch_layernorm_to_jax(jax_block.norm3, torch_block.norm3),
         )
 
-        jax_model = eqx.tree_at(lambda m: m.transformer_blocks[i], jax_model, jax_block)
+        jax_model = eqx.tree_at(lambda m, idx=i: m.transformer_blocks[idx], jax_model, jax_block)
 
     jax_model = eqx.tree_at(
         lambda m: m.decoder.linear1,

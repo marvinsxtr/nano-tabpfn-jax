@@ -83,104 +83,49 @@ class TransformerEncoderLayer(eqx.Module):
     nhead: int
     mlp_hidden_size: int
 
-    # Self-attention layers
-    self_attn_datapoints_q: eqx.nn.Linear
-    self_attn_datapoints_k: eqx.nn.Linear
-    self_attn_datapoints_v: eqx.nn.Linear
-    self_attn_datapoints_out: eqx.nn.Linear
+    self_attn_features: eqx.nn.MultiheadAttention
+    self_attn_datapoints: eqx.nn.MultiheadAttention
 
-    self_attn_features_q: eqx.nn.Linear
-    self_attn_features_k: eqx.nn.Linear
-    self_attn_features_v: eqx.nn.Linear
-    self_attn_features_out: eqx.nn.Linear
-
-    # MLP layers
     linear1: eqx.nn.Linear
     linear2: eqx.nn.Linear
 
-    # Layer norms
     norm1: eqx.nn.LayerNorm
     norm2: eqx.nn.LayerNorm
     norm3: eqx.nn.LayerNorm
 
     def __init__(self, embedding_size: int, nhead: int, mlp_hidden_size: int, *, key: PRNGKeyArray) -> None:
-        keys = jax.random.split(key, 11)
+        keys = jax.random.split(key, 5)
 
         self.embedding_size = embedding_size
         self.nhead = nhead
         self.mlp_hidden_size = mlp_hidden_size
 
-        # Self-attention between datapoints
-        self.self_attn_datapoints_q = eqx.nn.Linear(embedding_size, embedding_size, key=keys[0])
-        self.self_attn_datapoints_k = eqx.nn.Linear(embedding_size, embedding_size, key=keys[1])
-        self.self_attn_datapoints_v = eqx.nn.Linear(embedding_size, embedding_size, key=keys[2])
-        self.self_attn_datapoints_out = eqx.nn.Linear(embedding_size, embedding_size, key=keys[3])
+        self.self_attn_features = eqx.nn.MultiheadAttention(
+            num_heads=nhead,
+            query_size=embedding_size,
+            use_query_bias=True,
+            use_key_bias=True,
+            use_value_bias=True,
+            use_output_bias=True,
+            key=keys[0],
+        )
 
-        # Self-attention between features
-        self.self_attn_features_q = eqx.nn.Linear(embedding_size, embedding_size, key=keys[4])
-        self.self_attn_features_k = eqx.nn.Linear(embedding_size, embedding_size, key=keys[5])
-        self.self_attn_features_v = eqx.nn.Linear(embedding_size, embedding_size, key=keys[6])
-        self.self_attn_features_out = eqx.nn.Linear(embedding_size, embedding_size, key=keys[7])
+        self.self_attn_datapoints = eqx.nn.MultiheadAttention(
+            num_heads=nhead,
+            query_size=embedding_size,
+            use_query_bias=True,
+            use_key_bias=True,
+            use_value_bias=True,
+            use_output_bias=True,
+            key=keys[1],
+        )
 
-        # MLP
-        self.linear1 = eqx.nn.Linear(embedding_size, mlp_hidden_size, key=keys[8])
-        self.linear2 = eqx.nn.Linear(mlp_hidden_size, embedding_size, key=keys[9])
+        self.linear1 = eqx.nn.Linear(embedding_size, mlp_hidden_size, key=keys[2])
+        self.linear2 = eqx.nn.Linear(mlp_hidden_size, embedding_size, key=keys[3])
 
-        # Layer norms
         self.norm1 = eqx.nn.LayerNorm(embedding_size)
         self.norm2 = eqx.nn.LayerNorm(embedding_size)
         self.norm3 = eqx.nn.LayerNorm(embedding_size)
-
-    def _multihead_attention_features(
-        self,
-        query: Float[Array, "seq_len embed_dim"],
-        key: Float[Array, "seq_len embed_dim"],
-        value: Float[Array, "seq_len embed_dim"],
-    ) -> Float[Array, "seq_len embed_dim"]:
-        """Compute multi-head attention for features."""
-        seq_len, embed_dim = query.shape
-        head_dim = embed_dim // self.nhead
-
-        q = jax.vmap(self.self_attn_features_q)(query)
-        k = jax.vmap(self.self_attn_features_k)(key)
-        v = jax.vmap(self.self_attn_features_v)(value)
-
-        # Reshape for multi-head: (seq_len, nhead, head_dim)
-        q = q.reshape(seq_len, self.nhead, head_dim)
-        k = k.reshape(key.shape[0], self.nhead, head_dim)
-        v = v.reshape(value.shape[0], self.nhead, head_dim)
-
-        attn_out = jax.nn.dot_product_attention(q, k, v, mask=None, implementation="xla")
-
-        attn_out = attn_out.reshape(seq_len, embed_dim)
-
-        return jax.vmap(self.self_attn_features_out)(attn_out)
-
-    def _multihead_attention_datapoints(
-        self,
-        query: Float[Array, "seq_len embed_dim"],
-        key: Float[Array, "seq_len embed_dim"],
-        value: Float[Array, "seq_len embed_dim"],
-        mask: Float[Array, "..."] | None = None,
-    ) -> Float[Array, "seq_len embed_dim"]:
-        """Compute multi-head attention for datapoints."""
-        seq_len, embed_dim = query.shape
-        head_dim = embed_dim // self.nhead
-
-        q = jax.vmap(self.self_attn_datapoints_q)(query)
-        k = jax.vmap(self.self_attn_datapoints_k)(key)
-        v = jax.vmap(self.self_attn_datapoints_v)(value)
-
-        # Reshape for multi-head: (seq_len, nhead, head_dim)
-        q = q.reshape(seq_len, self.nhead, head_dim)
-        k = k.reshape(key.shape[0], self.nhead, head_dim)
-        v = v.reshape(value.shape[0], self.nhead, head_dim)
-
-        attn_out = jax.nn.dot_product_attention(q, k, v, mask=mask, implementation="xla")
-
-        attn_out = attn_out.reshape(seq_len, embed_dim)
-
-        return jax.vmap(self.self_attn_datapoints_out)(attn_out)
 
     def __call__(
         self,
@@ -200,16 +145,16 @@ class TransformerEncoderLayer(eqx.Module):
         Returns:
             (num_rows, num_features+1, embedding_size)
         """
-        src_features = jax.vmap(self._multihead_attention_features)(src, src, src) + src
+        src_features = jax.vmap(self.self_attn_features)(src, src, src) + src
         src = jax.vmap(jax.vmap(self.norm1))(src_features)
 
         src = jnp.transpose(src, (1, 0, 2))
 
-        mask = train_mask[None, :]  # (1, rows_size) - broadcasts to (nhead, rows, rows)
+        num_rows = src.shape[1]
+        mask = jnp.broadcast_to(train_mask, (num_rows, num_rows))
 
-        mha = partial(self._multihead_attention_datapoints, mask=mask)
-        src_attended = jax.vmap(mha)(src, src, src)
-        src = src_attended + src
+        masked_mha = partial(self.self_attn_datapoints, mask=mask)
+        src = jax.vmap(masked_mha)(src, src, src) + src
 
         src = jnp.transpose(src, (1, 0, 2))
 
@@ -291,7 +236,6 @@ class NanoTabPFNModel(eqx.Module):
         Returns:
             logits of shape (test_size, num_outputs) for test datapoints only
         """
-        # Ensure y_src has the right shape
         if len(y_src.shape) < len(x_src.shape):
             y_src = y_src[..., None]
 
@@ -305,7 +249,6 @@ class NanoTabPFNModel(eqx.Module):
 
         output = self.decoder(src[:, -1, :])
 
-        # Mask out train predictions, keep only test predictions
         test_mask = (~train_mask)[:, None]  # (num_rows, 1)
         output = output * test_mask
 
@@ -346,27 +289,22 @@ class NanoTabPFNClassifier:
         """
         x = jnp.concatenate((self.X_train, X_test))
 
-        # Pad features to fixed size (10) to avoid recompilation
         num_features = x.shape[1]
         if x.shape[1] < 10:
             padding = jnp.zeros((x.shape[0], 10 - num_features))
             x = jnp.concatenate([x, padding], axis=1)
 
-        # Pad targets with mean imputation for test positions
-        mean = self.y_train.mean()  # Scalar mean of training targets
+        mean = self.y_train.mean()
         num_test = len(X_test)
-        padding = np.full(num_test, mean)  # (num_test,) filled with mean
-        y = jnp.concatenate([self.y_train, padding])  # (num_total,)
+        padding = np.full(num_test, mean)
+        y = jnp.concatenate([self.y_train, padding])
 
         num_train = len(self.X_train)
         train_mask = jnp.arange(len(x)) < num_train
 
         out = predict(self.model, x, y, train_mask=train_mask)
 
-        # Extract only test predictions (train predictions are zeroed out)
         out = out[num_train:]
-
-        # Slice to keep only valid classes
         out = out[:, : self.num_classes]
 
         probabilities = jax.nn.softmax(out, axis=1)

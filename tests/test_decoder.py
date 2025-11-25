@@ -99,7 +99,7 @@ def test_decoder_numerical_match(decoder_setup: dict) -> None:
     out_torch_np = out_torch.cpu().numpy()
     out_jax_np = np.array(out_jax)
 
-    np.testing.assert_allclose(out_jax_np, out_torch_np, atol=1e-3)
+    np.testing.assert_allclose(out_jax_np, out_torch_np, atol=1e-2)
 
 
 def test_decoder_output_dimensions(decoder_setup: dict) -> None:

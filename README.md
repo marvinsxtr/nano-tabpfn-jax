@@ -13,7 +13,6 @@ The purpose of this repository is to be a good starting point for students and r
 - `train.py` implements a simple training loop and prior dump data loader in under 200 lines
 - `experiment.ipynb` will recreate the experiment from the paper
 
-
 ### Pretrain your own nanoTabPFN
 
 To pretrain your own nanoTabPFN, you need to first download a prior data dump from [here](http://ml.informatik.uni-freiburg.de/research-artifacts/nanoTabPFN/300k_150x5_2.h5), then run `train.py`.
@@ -22,10 +21,16 @@ To pretrain your own nanoTabPFN, you need to first download a prior data dump fr
 cd nanoTabPFN
 
 # download data dump
-curl http://ml.informatik.uni-freiburg.de/research-artifacts/nanoTabPFN/300k_150x5_2.h5 --output 300k_150x5_2.h5
+curl http://ml.informatik.uni-freiburg.de/research-artifacts/nanoTabPFN/300k_150x5_2.h5 --output 300k_150x5.h5
 
 python train.py
 ```
+
+### Evaluation
+
+![Evaluation results](nanotabpfn_summary.png)
+
+We repeated training for two seeds only; the paper uses 20. To reproduce these results, run `experiment.ipynb`.
 
 #### Step by Step explanation:
 
@@ -34,7 +39,7 @@ First we import our code from model.py and train.py
 from model import NanoTabPFNModel
 from model import NanoTabPFNClassifier
 from train import PriorDumpDataLoader
-from train import train, get_default_device
+from train import train
 ```
 Then we instantiate our model
 ```py
@@ -56,17 +61,15 @@ prior = PriorDumpDataLoader(
 ```
 Now we can train our model:
 ```py
-device = get_default_device()
 model, _ = train(
     model,
     prior,
     lr = 4e-3,
-    device = device
 )
 ```
 and finally we can instantiate our classifier:
 ```py
-clf = NanoTabPFNClassifier(model, device)
+clf = NanoTabPFNClassifier(model)
 ```
 and use its `.fit`, `.predict` and `.predict_proba`:
 ```py
