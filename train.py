@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import argparse
 import importlib
-import os
 import random
 import time
-from collections.abc import Callable, Generator
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import equinox as eqx
 import h5py
@@ -14,14 +14,18 @@ import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
 import optax
-import torch
-from jaxtyping import Array, Float
 from sklearn.datasets import load_breast_cancer
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, roc_auc_score
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
 
 from models.common import NanoTabPFNClassifier
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Generator
+
+    import torch
+    from jaxtyping import Array, Float
 
 
 def get_model_classes(version: str) -> tuple[type, type]:
@@ -160,7 +164,7 @@ def train(
                       with a dict mapping metric names to their average values across a list of datasets
     """
     if checkpoint_dir is not None:
-        os.makedirs(checkpoint_dir, exist_ok=True)
+        Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
 
     optimizer = optax.chain(
         optax.clip_by_global_norm(1.0), optax.contrib.schedule_free_adamw(learning_rate=lr, weight_decay=0.0)
@@ -202,7 +206,7 @@ def train(
 
             # Checkpoint
             if checkpoint_dir is not None and step % steps_per_checkpoint == steps_per_checkpoint - 1:
-                path = os.path.join(checkpoint_dir, f"step_{step + 1:06d}.eqx")
+                path = Path(checkpoint_dir) / f"step_{step + 1:06d}.eqx"
                 eqx.tree_serialise_leaves(path, model)
 
             # Evaluate
@@ -214,9 +218,9 @@ def train(
                 print(f"time {train_time:7.1f}s | loss {total_loss:7.4f} | {score_str}")
             elif step % steps_per_eval == steps_per_eval - 1 and eval_func is None:
                 print(f"time {train_time:7.1f}s | loss {total_loss:7.4f}")
-        
+
         # Checkpoint last iteration:
-        path = os.path.join(checkpoint_dir, f"model_{args.model}.eqx")
+        path = Path(checkpoint_dir) / f"model_{args.model}.eqx"
         eqx.tree_serialise_leaves(path, model)
 
     except KeyboardInterrupt:
