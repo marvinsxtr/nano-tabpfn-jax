@@ -1,3 +1,8 @@
+from __future__ import annotations
+
+import argparse
+import importlib
+import os
 import random
 import time
 from collections.abc import Callable, Generator
@@ -16,7 +21,13 @@ from sklearn.metrics import accuracy_score, balanced_accuracy_score, roc_auc_sco
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
 
-from model import NanoTabPFNClassifier, NanoTabPFNModel
+from models.common import NanoTabPFNClassifier
+
+
+def get_model_classes(version: str) -> tuple[type, type]:
+    """Return (NanoTabPFNModel, NanoTabPFNClassifier) for the given version string."""
+    module = importlib.import_module(f"models.{version}")
+    return module.NanoTabPFNModel, module.NanoTabPFNClassifier
 
 
 def set_randomness_seed(seed: int) -> None:
@@ -41,7 +52,7 @@ def eval(classifier: NanoTabPFNClassifier) -> dict[str, float]:  # noqa: A001
         prob = classifier.predict_proba(X_test)
         pred = prob.argmax(axis=1)  # avoid a second forward pass by not calling predict
         if prob.shape[1] == 2:
-            prob = prob[:, :1]
+            prob = prob[:, 1:]
         scores["roc_auc"] += float(roc_auc_score(y_test, prob, multi_class="ovr"))
         scores["acc"] += float(accuracy_score(y_test, pred))
         scores["balanced_acc"] += float(balanced_accuracy_score(y_test, pred))
@@ -51,7 +62,7 @@ def eval(classifier: NanoTabPFNClassifier) -> dict[str, float]:  # noqa: A001
 
 @eqx.filter_jit
 def compute_loss(
-    model: NanoTabPFNModel,
+    model: eqx.Module,
     data: tuple[Float[Array, "batch_size num_rows num_features"], Float[Array, "batch_size num_rows"]],
     targets: Float[Array, "batch_size num_rows"],
     train_mask: Float[Array, "batch_size num_rows"],
@@ -121,18 +132,24 @@ def make_step(
 
 
 def train(
-    model: NanoTabPFNModel,
+    model: eqx.Module,
     prior: DataLoader,
+    classifier_cls: type = NanoTabPFNClassifier,
     lr: float = 1e-4,
     steps_per_eval: int = 10,
     eval_func: Callable | None = None,
-) -> tuple[NanoTabPFNModel, list[tuple[float, dict]]]:
+    checkpoint_dir: str | None = "checkpoints",
+    steps_per_checkpoint: int = 100,
+) -> tuple[eqx.Module, list[tuple[float, dict]]]:
     """Trains our model on the given prior using cross-entropy loss.
 
     Args:
         model: NanoTabPFNModel in JAX/Equinox
         prior: DataLoader providing training batches
+        classifier_cls: classifier class to instantiate for eval (must accept the model as sole arg)
         lr: learning rate
+        checkpoint_dir: directory to save checkpoints (None to disable)
+        steps_per_checkpoint: how often to save a checkpoint
         steps_per_eval: how many steps we wait before running evaluation again
         eval_func: a function that takes in a classifier and returns a dict containing the average scores
                    for some metrics and datasets
@@ -142,6 +159,9 @@ def train(
         eval_history: list containing eval history, each entry is the real time used for training so far together
                       with a dict mapping metric names to their average values across a list of datasets
     """
+    if checkpoint_dir is not None:
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
     optimizer = optax.chain(
         optax.clip_by_global_norm(1.0), optax.contrib.schedule_free_adamw(learning_rate=lr, weight_decay=0.0)
     )
@@ -180,15 +200,24 @@ def train(
             step_train_duration = time.time() - step_start_time
             train_time += step_train_duration
 
+            # Checkpoint
+            if checkpoint_dir is not None and step % steps_per_checkpoint == steps_per_checkpoint - 1:
+                path = os.path.join(checkpoint_dir, f"step_{step + 1:06d}.eqx")
+                eqx.tree_serialise_leaves(path, model)
+
             # Evaluate
             if step % steps_per_eval == steps_per_eval - 1 and eval_func is not None:
-                classifier = NanoTabPFNClassifier(model)
+                classifier = classifier_cls(model)
                 scores = eval_func(classifier)
                 eval_history.append((train_time, scores))
                 score_str = " | ".join([f"{k} {v:7.4f}" for k, v in scores.items()])
                 print(f"time {train_time:7.1f}s | loss {total_loss:7.4f} | {score_str}")
             elif step % steps_per_eval == steps_per_eval - 1 and eval_func is None:
                 print(f"time {train_time:7.1f}s | loss {total_loss:7.4f}")
+        
+        # Checkpoint last iteration:
+        path = os.path.join(checkpoint_dir, f"model_{args.model}.eqx")
+        eqx.tree_serialise_leaves(path, model)
 
     except KeyboardInterrupt:
         pass
@@ -243,11 +272,27 @@ class PriorDumpDataLoader(DataLoader):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", default="v2", choices=["v2", "v3"])
+    parser.add_argument("--data", default="300k_150x5.h5")
+    parser.add_argument("--steps", type=int, default=2500)
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--lr", type=float, default=4e-3)
+    parser.add_argument("--steps-per-eval", type=int, default=25)
+    parser.add_argument("--checkpoint-dir", default="checkpoints")
+    parser.add_argument("--steps-per-checkpoint", type=int, default=1000)
+    args = parser.parse_args()
+
+    ModelCls, ClassifierCls = get_model_classes(args.model)
+
     key = jr.PRNGKey(0)
-    model = NanoTabPFNModel(
+    model = ModelCls(
         embedding_size=96, num_attention_heads=4, mlp_hidden_size=192, num_layers=3, num_outputs=2, key=key
     )
-    prior = PriorDumpDataLoader("300k_150x5.h5", num_steps=2500, batch_size=32)
-    model, history = train(model, prior, lr=4e-3, steps_per_eval=25)
+    prior = PriorDumpDataLoader(args.data, num_steps=args.steps, batch_size=args.batch_size)
+    model, history = train(
+        model, prior, classifier_cls=ClassifierCls, lr=args.lr, steps_per_eval=args.steps_per_eval,
+        eval_func=eval, checkpoint_dir=args.checkpoint_dir, steps_per_checkpoint=args.steps_per_checkpoint,
+    )
     print("Final evaluation:")
-    print(eval(NanoTabPFNClassifier(model)))
+    print(eval(ClassifierCls(model)))
