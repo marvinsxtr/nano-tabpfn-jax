@@ -12,7 +12,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jaxtyping import Array, Float, Int, PRNGKeyArray
+from jaxtyping import Array, Bool, Float, Int, PRNGKeyArray
 
 
 def _apply_rope(x: Float[Array, "num_heads seq head_dim"], half: int, theta: float) -> Array:
@@ -82,17 +82,17 @@ class QASSMax(eqx.Module):
         self.base_mlp = MLP(1, n_hidden, num_heads * head_dim, key=keys[0])
         self.query_mlp = MLP(head_dim, n_hidden, head_dim, key=keys[1])
 
-    def __call__(self, q: Float[Array, "num_heads seq head_dim"], n: int) -> Array:
+    def __call__(self, q: Float[Array, "num_heads seq head_dim"], n: Array | int) -> Array:
         """Scales the queries by a length-dependent, query-dependent factor.
 
         Args:
             q: Query tensor of shape (num_heads, seq, head_dim).
-            n: Number of keys attended to (context length).
+            n: Number of keys attended to (context length); may be a traced scalar.
 
         Returns:
             The modulated query tensor of the same shape as ``q``.
         """
-        logn = jnp.array([math.log(max(1, n))])  # (1,)
+        logn = jnp.log(jnp.maximum(1.0, jnp.asarray(n, dtype=jnp.float32))).reshape(1)  # (1,)
         base = self.base_mlp(logn).reshape(self.num_heads, 1, self.head_dim)
         modulation = 1.0 + jnp.tanh(jax.vmap(jax.vmap(self.query_mlp))(q))
         return base * modulation * q
@@ -155,12 +155,24 @@ class TransformerBlock(eqx.Module):
         self.ln_mlp = eqx.nn.LayerNorm(embed_dim)
         self.ssmax_layer = QASSMax(num_heads, self.head_dim, key=keys[3]) if ssmax else None
 
-    def _attn(self, q: Float[Array, "q_len embed"], k: Float[Array, "kv_len embed"]) -> Array:
+    def _attn(
+        self,
+        q: Float[Array, "q_len embed"],
+        k: Float[Array, "kv_len embed"],
+        key_mask: Bool[Array, " kv_len"] | None = None,
+    ) -> Array:
         """Computes multi-head attention where keys and values share the ``k`` input.
+
+        Instead of slicing the key/value sequence (which changes shapes), a boolean
+        ``key_mask`` excludes masked positions by setting their attention scores to
+        ``-inf`` before the softmax. This keeps every shape fixed at ``kv_len`` so the
+        model compiles once regardless of the train/test split point.
 
         Args:
             q: Query tensor of shape (q_len, embed_dim).
             k: Key/value tensor of shape (kv_len, embed_dim).
+            key_mask: Optional boolean mask of shape (kv_len,); ``False`` positions are
+                excluded from attention. Defaults to attending to all keys.
 
         Returns:
             Attention output of shape (q_len, embed_dim).
@@ -178,14 +190,19 @@ class TransformerBlock(eqx.Module):
         k_h = k_proj.reshape(-1, heads, head_dim).transpose(1, 0, 2)
         v_h = v_proj.reshape(-1, heads, head_dim).transpose(1, 0, 2)
 
+        # The reference feeds the number of *attended* keys into SSMax; with masking
+        # that is the count of unmasked positions, not the padded key length.
+        n_keys = k.shape[0] if key_mask is None else jnp.sum(key_mask)
         if self.ssmax_layer is not None:
-            q_h = self.ssmax_layer(q_h, k.shape[0])
+            q_h = self.ssmax_layer(q_h, n_keys)
         if self.use_rope:
             q_h = _apply_rope(q_h, self.rope_half, self.rope_theta)
             k_h = _apply_rope(k_h, self.rope_half, self.rope_theta)
 
         scale = 1.0 / math.sqrt(head_dim)
         scores = jnp.einsum("hqd,hkd->hqk", q_h, k_h) * scale
+        if key_mask is not None:
+            scores = scores + jnp.where(key_mask, 0.0, -jnp.inf)[None, None, :]
         weights = jax.nn.softmax(scores, axis=-1)
         out = jnp.einsum("hqk,hkd->hqd", weights, v_h)  # (heads, q_len, head_dim)
         out = out.transpose(1, 0, 2).reshape(-1, embed_dim)
@@ -196,15 +213,16 @@ class TransformerBlock(eqx.Module):
         q: Float[Array, "q_len embed"],
         kv: Float[Array, "kv_len embed"] | None = None,
         q_max_idx: int | None = None,
-        kv_max_idx: int | None = None,
+        key_mask: Bool[Array, " kv_len"] | None = None,
     ) -> Array:
         """Applies pre-norm attention followed by a pre-norm MLP.
 
         Args:
             q: Query sequence of shape (q_len, embed_dim).
             kv: Optional key/value sequence; defaults to ``q`` (self-attention).
-            q_max_idx: If set, only the first ``q_max_idx`` queries are kept.
-            kv_max_idx: If set, only the first ``kv_max_idx`` keys/values are used.
+            q_max_idx: If set, only the first ``q_max_idx`` queries are kept (a static
+                slice used to keep only the CLS-column queries).
+            key_mask: Optional boolean mask over keys; ``False`` positions are excluded.
 
         Returns:
             The updated sequence of shape (q_len or q_max_idx, embed_dim).
@@ -212,12 +230,10 @@ class TransformerBlock(eqx.Module):
         x = q
         q = jax.vmap(self.ln_attn)(q)
         kv = q if kv is None else jax.vmap(self.ln_attn)(kv)
-        if kv_max_idx is not None:
-            kv = kv[:kv_max_idx]
         if q_max_idx is not None:
             x, q = x[:q_max_idx], q[:q_max_idx]
 
-        x = x + self._attn(q, kv)
+        x = x + self._attn(q, kv, key_mask)
         return x + jax.vmap(self.mlp)(jax.vmap(self.ln_mlp)(x))
 
 
@@ -250,7 +266,7 @@ class InducedTransformerBlock(eqx.Module):
         q: Float[Array, "seq embed"],
         kv: Float[Array, "kv_len embed"] | None = None,
         q_max_idx: int | None = None,
-        kv_max_idx: int | None = None,
+        key_mask: Bool[Array, " kv_len"] | None = None,
     ) -> Array:
         """Summarizes the keys into inducing vectors, then queries attend to them.
 
@@ -258,13 +274,14 @@ class InducedTransformerBlock(eqx.Module):
             q: Query sequence of shape (seq, embed_dim).
             kv: Optional key/value sequence; defaults to ``q``.
             q_max_idx: If set, only the first ``q_max_idx`` queries are kept.
-            kv_max_idx: If set, only the first ``kv_max_idx`` keys/values are used.
+            key_mask: Optional boolean mask over keys; ``False`` positions are excluded
+                when summarizing into the inducing vectors.
 
         Returns:
             The updated query sequence.
         """
         kv_in = q if kv is None else kv
-        summary = self.tfm1(self.inducing_vectors, kv_in, kv_max_idx=kv_max_idx)
+        summary = self.tfm1(self.inducing_vectors, kv_in, key_mask=key_mask)
         return self.tfm2(q, summary, q_max_idx=q_max_idx)
 
 
@@ -349,24 +366,33 @@ class NanoTabICLModel(eqx.Module):
     def __call__(
         self,
         x: Float[Array, "num_rows num_cols"],
-        y: Int[Array, " num_train"],
-        n_train: int,
-    ) -> Float[Array, "num_test out_dim"]:
-        """Runs the full forward pass and returns logits for the test rows.
+        y: Int[Array, " num_rows"],
+        train_mask: Bool[Array, " num_rows"],
+    ) -> Float[Array, "num_rows out_dim"]:
+        """Runs the full forward pass and returns logits for every row.
+
+        Every intermediate keeps a fixed leading dimension of ``num_rows``; the
+        train/test split is expressed purely through ``train_mask`` (rather than by
+        slicing), so the model compiles once per ``(num_rows, num_cols)`` regardless of
+        how many rows are training rows. The caller selects the test rows from the
+        output.
 
         Args:
-            x: Feature matrix of shape (num_rows, num_cols); train rows come first.
-            y: Integer class labels for the training rows, shape (num_train,).
-            n_train: Number of training rows (static).
+            x: Feature matrix of shape (num_rows, num_cols).
+            y: Integer class labels of shape (num_rows,); values on non-training rows
+                are ignored (masked out).
+            train_mask: Boolean mask of shape (num_rows,) marking training rows.
 
         Returns:
-            Logits of shape (num_test, out_dim) for the test rows.
+            Logits of shape (num_rows, out_dim); only test-row logits are meaningful.
         """
         n_rows, n_cols = x.shape
+        train_f = train_mask.astype(x.dtype)
 
         # ----- Embedding: standardize by train stats -> repeated feature grouping -> embed
-        mean = jnp.mean(x[:n_train], axis=0, keepdims=True)
-        std = jnp.std(x[:n_train], axis=0, keepdims=True) + 1e-8
+        mask_col = train_mask[:, None]
+        mean = jnp.mean(x, axis=0, keepdims=True, where=mask_col)
+        std = jnp.std(x, axis=0, keepdims=True, where=mask_col) + 1e-8
         x = (x - mean) / std
         idxs = jnp.arange(n_cols)
         groups = [x[:, (idxs + (2**i - 1)) % n_cols] for i in range(self.feature_group_size)]
@@ -374,12 +400,12 @@ class NanoTabICLModel(eqx.Module):
         emb = jax.vmap(jax.vmap(self.x_embed))(x_grouped)  # (n_rows, n_cols, embed_dim)
 
         y_int = y.astype(jnp.int32)
-        y_in = jax.vmap(self.y_embed_in)(y_int)  # (n_train, embed_dim)
-        emb = jnp.concatenate([emb[:n_train] + y_in[:, None, :], emb[n_train:]], axis=0)
+        y_in = jax.vmap(self.y_embed_in)(y_int)  # (n_rows, embed_dim)
+        emb = emb + (train_f[:, None, None] * y_in[:, None, :])  # add y embedding to train rows only
 
         # ----- TF_col: induced self-attention within each column (rows attend to train rows)
         for block in self.col_blocks:
-            emb = jax.vmap(lambda s, b=block: b(s, kv_max_idx=n_train), in_axes=1, out_axes=1)(emb)
+            emb = jax.vmap(lambda s, b=block: b(s, key_mask=train_mask), in_axes=1, out_axes=1)(emb)
 
         # ----- TF_row: prepend CLS columns -> row attention -> norm + merge CLS tokens
         cls = jnp.broadcast_to(self.row_cls_tokens, (n_rows, self.n_cls_cols, self.embed_dim))
@@ -391,12 +417,11 @@ class NanoTabICLModel(eqx.Module):
         emb = jax.vmap(jax.vmap(self.row_ln))(emb)  # (n_rows, n_cls_cols, embed_dim)
         emb = emb.reshape(n_rows, self.n_cls_cols * self.embed_dim)  # (n_rows, icl_dim)
 
-        # ----- TF_icl: add y embedding again -> self-attention over rows
-        y_icl = jax.vmap(self.y_embed_icl)(y_int)  # (n_train, icl_dim)
-        emb = jnp.concatenate([emb[:n_train] + y_icl, emb[n_train:]], axis=0)
-        for block in self.icl_blocks[:-1]:
-            emb = block(emb, kv_max_idx=n_train)
-        emb = self.icl_blocks[-1](emb[n_train:], emb[:n_train])  # (n_test, icl_dim)
+        # ----- TF_icl: add y embedding again -> self-attention over rows (attend to train rows)
+        y_icl = jax.vmap(self.y_embed_icl)(y_int)  # (n_rows, icl_dim)
+        emb = emb + (train_f[:, None] * y_icl)
+        for block in self.icl_blocks:
+            emb = block(emb, key_mask=train_mask)
 
         return jax.vmap(self.out_mlp)(jax.vmap(self.out_ln)(emb))
 
@@ -405,11 +430,11 @@ class NanoTabICLModel(eqx.Module):
 def predict(
     model: NanoTabICLModel,
     x: Float[Array, "num_rows num_cols"],
-    y: Int[Array, " num_train"],
-    n_train: int,
-) -> Float[Array, "num_test out_dim"]:
+    y: Int[Array, " num_rows"],
+    train_mask: Bool[Array, " num_rows"],
+) -> Float[Array, "num_rows out_dim"]:
     """JIT-compiled prediction function for :class:`NanoTabICLModel`."""
-    return model(x, y, n_train)
+    return model(x, y, train_mask)
 
 
 class NanoTabICLClassifier:
@@ -447,11 +472,15 @@ class NanoTabICLClassifier:
             Probabilities of shape (num_test, num_classes).
         """
         x = jnp.concatenate([jnp.asarray(self.X_train), jnp.asarray(X_test)])
-        y = jnp.asarray(self.y_train).astype(jnp.int32)
-        n_train = len(self.X_train)
+        num_train = len(self.X_train)
 
-        out = predict(self.model, x, y, n_train)
-        out = out[:, : self.num_classes]
+        # Pad labels to the full row count; test-row labels are ignored (masked out).
+        y_train = jnp.asarray(self.y_train).astype(jnp.int32)
+        y = jnp.concatenate([y_train, jnp.zeros(len(X_test), dtype=jnp.int32)])
+        train_mask = jnp.arange(len(x)) < num_train
+
+        out = predict(self.model, x, y, train_mask)
+        out = out[num_train:, : self.num_classes]
         return np.array(jax.nn.softmax(out, axis=1))
 
     def predict(self, X_test: np.ndarray) -> np.ndarray:

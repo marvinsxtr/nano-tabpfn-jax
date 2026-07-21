@@ -149,8 +149,11 @@ def _torch_forward(setup: dict) -> np.ndarray:
 
 
 def _jax_forward(setup: dict) -> np.ndarray:
-    out = setup["jax_model"](jnp.array(setup["x_np"]), jnp.array(setup["y_np"]), setup["n_train"])
-    return np.array(out)
+    n_train, n_test = setup["n_train"], setup["n_test"]
+    y_full = np.concatenate([setup["y_np"], np.zeros(n_test, dtype=np.int64)])
+    train_mask = jnp.arange(n_train + n_test) < n_train
+    out = setup["jax_model"](jnp.array(setup["x_np"]), jnp.array(y_full), train_mask)
+    return np.array(out)[n_train:]  # keep only the meaningful test-row logits
 
 
 # --------------------------------------------------------------------------- #
@@ -219,9 +222,10 @@ def test_transformer_block_kv_max_idx() -> None:
     np.random.seed(0)
     src_np = np.random.randn(seq, embed_dim).astype(np.float32)
 
+    key_mask = jnp.arange(seq) < kv_max
     with torch.no_grad():
         out_torch = torch_b(torch.from_numpy(src_np).unsqueeze(0), kv_max_idx=kv_max).squeeze(0).numpy()
-    out_jax = np.array(jax_b(jnp.array(src_np), kv_max_idx=kv_max))
+    out_jax = np.array(jax_b(jnp.array(src_np), key_mask=key_mask))
     np.testing.assert_allclose(out_jax, out_torch, atol=1e-4)
 
 
@@ -237,10 +241,11 @@ def test_induced_block_matches() -> None:
     np.random.seed(0)
     src_np = np.random.randn(seq, embed_dim).astype(np.float32)
     kv_max = 4
+    key_mask = jnp.arange(seq) < kv_max
 
     with torch.no_grad():
         out_torch = torch_b(torch.from_numpy(src_np).unsqueeze(0), kv_max_idx=kv_max).squeeze(0).numpy()
-    out_jax = np.array(jax_b(jnp.array(src_np), kv_max_idx=kv_max))
+    out_jax = np.array(jax_b(jnp.array(src_np), key_mask=key_mask))
     np.testing.assert_allclose(out_jax, out_torch, atol=1e-4)
 
 
